@@ -17,7 +17,7 @@
 */
 
 
-#include <server/command_control.h>
+#include "../command_control.h"
 #include <stdio.h>
 #include <unistd.h>
 #include "list_speakers.h"

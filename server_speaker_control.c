@@ -34,6 +34,7 @@ channel_list_t *channel_list = 0; // audio source supported channel
 static addr_t listen_ip = {AF_INET, .ipv6 = IN6ADDR_ANY_INIT};
 
 static control_package_t control_resp = {0};
+static uint8_t buffer[CONTROL_PACKAGE_SIZE] = {0};
 
 static connection_t conn = DEFAULT_CONNECTION_UDP_INIT;
 
@@ -60,7 +61,10 @@ int server_spctrl_sendto_speaker(const speaker_t *speaker, const void *package, 
 
 int server_spctrl_speaker(const speaker_t *speaker, const control_package_t *hd) {
   LOGD("speaker control command: %d", hd->cmd);
-  return server_spctrl_sendto_speaker(speaker, hd, CONTROL_PACKAGE_SIZE);
+
+  CONTROL_PACKAGE_ENCODE(buffer, hd);
+
+  return server_spctrl_sendto_speaker(speaker, buffer, CONTROL_PACKAGE_SIZE);
 }
 
 /**
@@ -86,8 +90,8 @@ int server_spctrl_connect(const speaker_t *speaker) {
   return OK;
 }
 
-int create_control_socket() {
-  int ctrl_sockfd = socket(listen_ip.type, SOCK_DGRAM, IPPROTO_UDP);
+socket_t create_control_socket() {
+  socket_t ctrl_sockfd = socket(listen_ip.type, SOCK_DGRAM, IPPROTO_UDP);
   if (ctrl_sockfd < 0) {
     LOGF("speaker control socket error: %m");
     xexit(EERR_SOCKET);
@@ -144,12 +148,15 @@ void server_spctrl_set_format(const channel_list_t *list, uint32_t rate, uint32_
 }
 
 int server_spctrl_init(struct server_spctrl_config_s *cfg) {
-  if (cfg != NULL) {
-    listen_ip.type = cfg->family;
-    if (cfg->ip) memcpy(&listen_ip, cfg->ip, sizeof(addr_t));
-    else bzero(&listen_ip.ipv6, sizeof(struct in6_addr));
+  if (cfg == NULL || cfg->family == 0) {
+    LOGF("family can not empty");
+    xexit(EERR_ARG);
   }
+  listen_ip.type = cfg->family;
+  if (cfg->ip) memcpy(&listen_ip, cfg->ip, sizeof(addr_t));
+  else bzero(&listen_ip.ipv6, sizeof(struct in6_addr));
 
+  conn.family = cfg->family;
   conn.read_cb = srv_spctrl_read;
   conn.read_fd = create_control_socket();
   event_add(&conn);

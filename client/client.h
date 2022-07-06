@@ -6,7 +6,7 @@
 #include <string.h>
 #include "../common/package/pcm.h"
 
-#include "../common/castspeaker.h"
+#include "../common/common.h"
 #include "../common/audio.h"
 #include "../common/speaker_struct.h"
 
@@ -26,7 +26,7 @@ extern uint32_t ctrl_mtu;
 
 extern int sockfd;
 
-typedef int (*output_send_fn)(channel_header_t *header, const uint8_t *data);
+typedef int (*output_send_fn)(pcm_header_t *header, const uint8_t *data);
 
 void (*main_loop)(output_send_fn fn);
 

@@ -179,7 +179,7 @@ int main(int argc, char *argv[]) {
   }
 
   if (group_ip) {
-    ip_stoa(&multicast_group, group_ip);
+    addr_stoa(&multicast_group, group_ip);
     free(group_ip);
     if (multicast_group.type != family) {
       printf("The multicast group ip family is ipv6, please use -6 and try again.\n");
@@ -216,6 +216,7 @@ int main(int argc, char *argv[]) {
   server_spctrl_init(&ctrl_cfg);
 
   struct speaker_push_config push_cfg = {
+    .family = family,
     .ip = &interface.ip,
   };
   server_sppush_init(&push_cfg);

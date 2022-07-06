@@ -28,7 +28,7 @@
 #include "server_mutex.h"
 #include "common/error.h"
 #include "common/speaker_struct.h"
-#include "common/castspeaker.h"
+#include "common/common.h"
 #include "server.h"
 
 

@@ -3,8 +3,8 @@
 #include <sys/un.h>
 #include <sys/resource.h>
 #include <signal.h>
-#include <common/error.h>
-#include <common/log.h>
+#include "../common/error.h"
+#include "../common/log.h"
 #include "client.h"
 #include "pipe.h"
 
