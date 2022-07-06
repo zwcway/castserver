@@ -9,6 +9,7 @@ set(SERVER_LIBRARIES
     common
     Threads::Threads
     microhttpd
+    m
     )
 
 find_package(Threads REQUIRED)

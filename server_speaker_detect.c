@@ -34,7 +34,7 @@
 
 #include "server_speaker_detect.h"
 #include "server.h"
-#include "common/castspeaker.h"
+#include "common/common.h"
 #include "server_mutex.h"
 #include "server_speaker_control.h"
 #include "config.h"
@@ -107,8 +107,8 @@ int valid_speaker(detect_request_t *header) {
 /*
  * listen multicast to detect speaker
  */
-int create_detect_socket() {
-  unsigned char multicastTTL = 1;
+socket_t create_detect_socket() {
+  unsigned char multicastTTL = 2;
   struct in6_addr *src_addr = NULL;
   socklen_t sock_len = 0;
   struct sockaddr_storage group_addr = {0};
@@ -117,7 +117,7 @@ int create_detect_socket() {
   sa_family_t af = interface.ip.type;
   addr_t bind_addr = {.type = af, .ipv6 = IN6ADDR_ANY_INIT};
 
-  int detect_sockfd = socket(af, SOCK_DGRAM, IPPROTO_UDP);
+  socket_t detect_sockfd = socket(af, SOCK_DGRAM, IPPROTO_UDP);
   if (detect_sockfd < 0) {
     LOGF("detect socket error: %m");
     xexit(EERR_SOCKET);
@@ -209,6 +209,7 @@ void multicast_serverinfo() {
 //    close(sockfd);
 //    return;
 //  }
+
   // multicast
   ssize_t s = sendto(conn.read_fd,
                      &server_notify_resp, sizeof(server_notify_resp),
@@ -217,6 +218,9 @@ void multicast_serverinfo() {
   if (s < 0) {
     LOGE("sendto error: %m");
   }
+  if (s != sizeof(server_notify_resp)) {
+    LOGE("response server info fail. sended %d/%d", s, sizeof(server_notify_resp));
+  }
   server_notify_resp.type = 0;
 //  shutdown(sockfd, 0);
 //  close(sockfd);
@@ -224,6 +228,8 @@ void multicast_serverinfo() {
 
 int srv_detect_read(connection_t *c, const struct sockaddr_storage *src, socklen_t src_len, const void *package,
                     uint32_t len) {
+  detect_request_t req = {0};
+
   if (len == MUTEX_TAG_SIZE && memcmp(package, MUTEX_TAG, MUTEX_TAG_SIZE) == 0) {
     LOGI("detect another server %s, just kill it.", sockaddr_ntop(src));
     len = sendto(c->read_fd,
@@ -236,14 +242,26 @@ int srv_detect_read(connection_t *c, const struct sockaddr_storage *src, socklen
     }
     return 0;
   }
-  if (len != sizeof(detect_request_t)) {
-    LOGD("detect receive error. size %d need %d", (uint32_t) len, sizeof(detect_request_t));
-    return -1;
-  }
-  if (valid_speaker((detect_request_t *) package) != 0) {
+  if (len != DETECT_REQUEST_SIZE(src->ss_family)) {
+    LOGD("detect receive error. size %d need %d from %s:%d",
+         (uint32_t) len, DETECT_REQUEST_SIZE(src->ss_family),
+         sockaddr_ntop(src), sockaddr_port(src)
+    );
     return -1;
   }
 
+  DETECT_REQUEST_DECODE(src->ss_family, &req, package);
+
+  if (!EQUAL_SOCK_ADDR(src, &req.addr)) {
+    LOGW("invalid source ip %s:%d (%s)", sockaddr_ntop(src), sockaddr_port(src), addr_ntop(&req.addr));
+    return -1;
+  }
+
+  if (valid_speaker(&req) != 0) {
+    return -1;
+  }
+
+  src_len = set_sockaddr((struct sockaddr_storage *) src, &req.addr, 4414);
   server_notify_resp.type = 0;
   // response server addr
   ssize_t n = sendto(c->read_fd,
@@ -257,7 +275,7 @@ int srv_detect_read(connection_t *c, const struct sockaddr_storage *src, socklen
   if (n != sizeof(server_notify_resp)) {
     LOGE("response server info fail. sended %d/%d", len, sizeof(server_notify_resp));
   }
-  LOGD("response server info to %s:%d", sockaddr_ntop(src), sockaddr_port(src));
+  LOGD("response server info to %s:%d  size %d", sockaddr_ntop(src), sockaddr_port(src), n);
   return 0;
 }
 
@@ -278,20 +296,22 @@ void *thread_online_detect(void *arg) {
 
 int server_detect_init(const struct server_detect_config_s *cfg) {
   if (cfg == NULL || NULL == cfg->interface) {
+    LOGF("interface can not empty");
     xexit(EERR_ARG);
   }
   memcpy(&interface, cfg->interface, sizeof(interface_t));
   if (cfg->multicast_group) {
     memcpy(&multicast_group, cfg->multicast_group, sizeof(addr_t));
   } else {
-    if (interface.ip.type == AF_INET) ip_stoa(&multicast_group, DEFAULT_MULTICAST_GROUP);
-    else ip_stoa(&multicast_group, DEFAULT_MULTICAST_GROUPV6);
+    if (interface.ip.type == AF_INET) addr_stoa(&multicast_group, DEFAULT_MULTICAST_GROUP);
+    else addr_stoa(&multicast_group, DEFAULT_MULTICAST_GROUPV6);
   }
 
   multicast_port = cfg->multicast_port ? cfg->multicast_port : DEFAULT_MULTICAST_PORT;
 
   detect_cb = cfg->added_cb;
 
+  conn.family = interface.ip.type;
   conn.read_cb = srv_detect_read;
   conn.read_fd = create_detect_socket();
   event_add(&conn);
@@ -316,10 +336,12 @@ int server_detect_deinit() {
     online_detect_thread = 0;
   }
 
-  server_notify_resp.type = DETECT_TYPE_EXIT;
-  multicast_serverinfo();
+  if (conn.read_fd) {
+    server_notify_resp.type = DETECT_TYPE_EXIT;
+    multicast_serverinfo();
 
-  close(conn.read_fd);
+    close(conn.read_fd);
+  }
 
   return 0;
 }

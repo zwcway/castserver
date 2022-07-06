@@ -24,12 +24,12 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
-#include <common/error.h>
+#include "../common/error.h"
 #include <errno.h>
 #include "pipe.h"
-#include "common/utils.h"
-#include "../server/command_control.h"
-#include "common/codec/wave.h"
+#include "../common/utils.h"
+#include "../command_control.h"
+#include "../common/codec/wave.h"
 #include "client.h"
 
 

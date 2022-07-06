@@ -35,8 +35,8 @@
 
 static int package_seq = 1;
 
-static uint32_t per_sample_bytes = 0;
-static uint8_t *buffer;
+static uint8_t *buffer = NULL;
+static pcm_header_t pcm_head = {0};
 
 static addr_t listen_ip = {AF_INET, .ipv6 = IN6ADDR_ANY_INIT};
 static push_port_fn port_cb = NULL;
@@ -63,23 +63,13 @@ int pusher_sendto_speaker(speaker_t *sp, const void *package, const size_t len) 
 }
 
 int push_speak(speaker_t *sp, const uint8_t *buf, const size_t len, const uint16_t seq) {
-  channel_header_t *hd = (channel_header_t *) buf;
+  PCM_HEADER_ENCODE((void *) buf, &pcm_head);
 
-  hd->ver = 1;
-  hd->compress = COMPRESS_NONE;
-  hd->sample.bits = config_speaker_bits;
-  hd->sample.rate = config_speaker_rate;
-  hd->sample.channel_mask = 0;
-  hd->sample.channel = sp->channel;
-  hd->seq = seq;
-  hd->len = len - sizeof(channel_header_t);
-
-  return pusher_sendto_speaker(sp, &buf, len);
+  return pusher_sendto_speaker(sp, buf, len);
 }
 
-int create_pusher_socket()
-{
-  int push_sockfd = socket(listen_ip.type, SOCK_DGRAM, IPPROTO_UDP);
+socket_t create_pusher_socket() {
+  socket_t push_sockfd = socket(listen_ip.type, SOCK_DGRAM, IPPROTO_UDP);
   if (push_sockfd < 0) {
     LOGF("create push socket failed: %m");
     xexit(EERR_SOCKET);
@@ -104,9 +94,10 @@ int server_sppush_push_channel(speaker_line_t line, audio_channel_t ch, const ui
   return 0;
 }
 
-int server_sppush_push(speaker_line_t line, const uint8_t *samples, size_t len, uint8_t bytes)
-{
-  uint8_t *body = buffer + sizeof(channel_header_t);
+int server_sppush_push(speaker_line_t line, const uint8_t *samples, size_t len, uint8_t bytes) {
+  if (NULL == buffer) return -1;
+
+  uint8_t *body = buffer + PCM_HEADER_SIZE;
   static uint8_t *src, *dst;
 
   for (int i = 0; i < channel_list->len; ++i) {
@@ -118,7 +109,7 @@ int server_sppush_push(speaker_line_t line, const uint8_t *samples, size_t len, 
       src += bytes * channel_list->len;
     }
     // TODO reformat rate
-    server_sppush_push_channel(line, channel_list->list[i], buffer, len + sizeof(channel_header_t));
+    server_sppush_push_channel(line, channel_list->list[i], buffer, len + PCM_HEADER_SIZE);
   }
 
   return 0;
@@ -140,16 +131,18 @@ int srv_sppush_read(connection_t *c, const struct sockaddr_storage *src, socklen
   return 0;
 }
 
-int server_sppush_init(struct speaker_push_config *cfg)
-{
-  if (cfg != NULL) {
-    listen_ip.type = cfg->family;
-    if (cfg->ip) memcpy(&listen_ip, cfg->ip, sizeof(addr_t));
-    else bzero(&listen_ip.ipv6, sizeof(struct in6_addr));
+int server_sppush_init(struct speaker_push_config *cfg) {
+  if (cfg == NULL || cfg->family == 0) {
+    LOGF("family can not empty");
+    xexit(EERR_ARG);
   }
+  listen_ip.type = cfg->family;
+  if (cfg->ip) memcpy(&listen_ip, cfg->ip, sizeof(addr_t));
+  else bzero(&listen_ip.ipv6, sizeof(struct in6_addr));
 
   buffer = xmalloc(config_mtu);
 
+  conn.family = cfg->family;
   conn.read_cb = srv_sppush_read;
   conn.read_fd = create_pusher_socket();
   event_add(&conn);
