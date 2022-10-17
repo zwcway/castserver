@@ -22,6 +22,7 @@
 #include <netinet/in.h>
 #include <string.h>
 #include <unistd.h>
+#include <assert.h>
 #include "common/log.h"
 #include "config.h"
 #include "common/connection.h"
@@ -35,8 +36,9 @@
 
 static int package_seq = 1;
 
-static uint8_t *buffer = NULL;
 static pcm_header_t pcm_head = {0};
+
+static uint8_t channel_buffer[1500] = {0};
 
 static addr_t listen_ip = {AF_INET, .ipv6 = IN6ADDR_ANY_INIT};
 static push_port_fn port_cb = NULL;
@@ -44,31 +46,7 @@ static push_port_fn port_cb = NULL;
 static connection_t conn = DEFAULT_CONNECTION_UDP_INIT;
 LOG_TAG_DECLR("server");
 
-int pusher_sendto_speaker(speaker_t *sp, const void *package, const size_t len) {
-  struct sockaddr_storage servaddr;
-  size_t s;
-  if (sp == NULL || sp->dport == 0 || sp->state != SPEAKER_STAT_ONLINE) {
-    LOGI("speaker(%s) offline", addr_ntop(&sp->ip));
-    sp->state = SPEAKER_STAT_OFFLINE;
-    return 1;
-  }
-  memset(&servaddr, 0, sizeof(servaddr));
-  set_sockaddr(&servaddr, &sp->ip, sp->dport);
-  s = sendto(conn.read_fd, (void *) package, len, 0, (const struct sockaddr *) &servaddr, sizeof(servaddr));
-  if (s < 0) {
-    LOGE("push error: %m");
-    return 1;
-  }
-  return 0;
-}
-
-int push_speak(speaker_t *sp, const uint8_t *buf, const size_t len, const uint16_t seq) {
-  PCM_HEADER_ENCODE((void *) buf, &pcm_head);
-
-  return pusher_sendto_speaker(sp, buf, len);
-}
-
-socket_t create_pusher_socket() {
+static socket_t create_pusher_socket() {
   socket_t push_sockfd = socket(listen_ip.type, SOCK_DGRAM, IPPROTO_UDP);
   if (push_sockfd < 0) {
     LOGF("create push socket failed: %m");
@@ -78,8 +56,77 @@ socket_t create_pusher_socket() {
   return push_sockfd;
 }
 
-int server_sppush_push_channel(speaker_line_t line, audio_channel_t ch, const uint8_t *buf, size_t len)
-{
+/**
+ * 加快消息推送速度，使用connect预连接
+ * 每个预连接都会优先创建新的socket
+ * @param speaker
+ * @return
+ */
+int server_sppush_connect(speaker_t *speaker) {
+  struct sockaddr_storage addr = {0};
+  socklen_t len;
+
+  if (!SPEAKER_SUPPORTED(speaker)) {
+    LOGE("speaker unspport, can not connect.");
+    return ERROR_SPEAKER;
+  }
+  if (!SPEAKER_IS_ONLINE(speaker)) {
+    LOGE("speaker offline, can not connect.");
+    return ERROR_SPEAKER;
+  }
+
+  len = set_sockaddr(&addr, &speaker->ip, speaker->dport);
+
+  speaker->fd = socket(listen_ip.type, SOCK_DGRAM | SOCK_NONBLOCK, IPPROTO_UDP);
+  if (speaker->fd < 0) {
+    speaker->fd = conn.read_fd;
+  }
+
+  if (connect(speaker->fd, (struct sockaddr *) &addr, len) != 0) {
+    LOGE("connect speaker %d error: %m", speaker->id);
+    return ERROR_SOCKET;
+  }
+
+  return OK;
+}
+
+int server_sppush_disconnect(speaker_t *speaker) {
+  if (speaker == NULL)
+    return 0;
+
+  if (speaker->fd < 0 || speaker->fd == conn.read_fd)
+    return 0;
+
+  shutdown(speaker->fd, 0);
+  close(speaker->fd);
+
+  return 0;
+}
+
+int pusher_sendto_speaker(speaker_t *sp, const void *package, const size_t len) {
+  struct sockaddr_storage servaddr;
+  size_t s;
+  if (sp == NULL || sp->dport == 0 || !SPEAKER_IS_ONLINE(sp) || sp->fd <= 0) {
+    LOGI("speaker(%s) offline", addr_ntop(&sp->ip));
+    speaker_check_online(sp);
+    server_sppush_disconnect(sp);
+    return 1;
+  }
+  if (!SPEAKER_SUPPORTED(sp)) {
+    server_sppush_disconnect(sp);
+    return 1;
+  }
+  memset(&servaddr, 0, sizeof(servaddr));
+  set_sockaddr(&servaddr, &sp->ip, sp->dport);
+  s = sendto(sp->fd, (void *) package, len, 0, (const struct sockaddr *) &servaddr, sizeof(struct sockaddr));
+  if (s < 0) {
+    LOGE("push to speaker error: %m", sp->id);
+    return 1;
+  }
+  return 0;
+}
+
+int server_sppush_push_channel(speaker_line_t line, audio_channel_t ch, uint8_t *buf, size_t len) {
   if ((short) package_seq++ == -1) {
     package_seq = 1;
   }
@@ -88,28 +135,37 @@ int server_sppush_push_channel(speaker_line_t line, audio_channel_t ch, const ui
   if (list == NULL) return 1;
 
   for (int i = 0; i < list->len; ++i) {
-    push_speak(list->speakers[i], buf, len, package_seq);
+    pcm_header_encode((void *) buf, &pcm_head);
+
+    pusher_sendto_speaker(list->speakers[i], buf, len);
   }
 
   return 0;
 }
 
-int server_sppush_push(speaker_line_t line, const uint8_t *samples, size_t len, uint8_t bytes) {
-  if (NULL == buffer) return -1;
+int server_sppush_push(speaker_line_t line, const uint8_t *samples, size_t len, const channel_list_t *chlist,
+                       uint8_t bits) {
+  uint8_t *src, *dst, *end = (uint8_t *) (samples + len - bits);
+  uint32_t step = bits * chlist->len;
 
-  uint8_t *body = buffer + PCM_HEADER_SIZE;
-  static uint8_t *src, *dst;
+  assert(PCM_HEADER_SIZE + len < sizeof(channel_buffer));
+  assert((int) (len / (chlist->len * bits)) == (len / (chlist->len * bits * 1.0)));
+  assert(len / (chlist->len) < config_mtu);
 
-  for (int i = 0; i < channel_list->len; ++i) {
-    src = (uint8_t *) samples + i * bytes;
-    dst = body;
-    while (dst - body < len) {
-      memcpy(dst, src, bytes);
-      dst += bytes;
-      src += bytes * channel_list->len;
+  audio_channel_t ch;
+
+  for (int i = 0; i < chlist->len; ++i) {
+    ch = chlist->list[i];
+    src = (uint8_t *) (samples + i * bits);
+    dst = channel_buffer + PCM_HEADER_SIZE;
+    while (src <= end) {
+      BITS_CPY(dst, src, bits);
+      dst += bits;
+      src += step;
     }
+
     // TODO reformat rate
-    server_sppush_push_channel(line, channel_list->list[i], buffer, len + PCM_HEADER_SIZE);
+    server_sppush_push_channel(line, ch, channel_buffer, len + PCM_HEADER_SIZE);
   }
 
   return 0;
@@ -140,12 +196,10 @@ int server_sppush_init(struct speaker_push_config *cfg) {
   if (cfg->ip) memcpy(&listen_ip, cfg->ip, sizeof(addr_t));
   else bzero(&listen_ip.ipv6, sizeof(struct in6_addr));
 
-  buffer = xmalloc(config_mtu);
-
   conn.family = cfg->family;
   conn.read_cb = srv_sppush_read;
   conn.read_fd = create_pusher_socket();
-  event_add(&conn);
+//  event_add(&conn);
 
   return 0;
 }
@@ -155,8 +209,6 @@ int server_sppush_deinit()
   LOGT("deinit");
 
   close(conn.read_fd);
-
-  free(buffer);
 
   return 0;
 }

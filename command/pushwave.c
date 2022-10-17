@@ -55,13 +55,16 @@ int cmd_wave(int connfd, const void *arg, size_t length)
   chunk = get_chunksize(NULL, config_chunk_type);
   get_format(&format);
 
-  server_spctrl_set_format(get_channel_list(), format.samples_per_sec, format.bits_per_sample);
+  channel_list_t *chlist = get_channel_list();
 
-  int per_simple_chunk_bytes = chunk / format.channels;
+  int per_sample_chunk_bytes = chunk / format.channels;
   uint8_t bytes = format.bits_per_sample / 8;
   data = (uint8_t *) arg + header_size;
+
+  server_spctrl_set_format(chlist, format.samples_per_sec, format.bits_per_sample);
+
   while ((offset = length - header_size) >= chunk) {
-    server_sppush_push(DEFAULT_LINE, data, per_simple_chunk_bytes, bytes);
+    server_sppush_push(DEFAULT_LINE, data, per_sample_chunk_bytes, chlist, bytes);
     length -= chunk;
     data += chunk;
   }
@@ -71,7 +74,7 @@ int cmd_wave(int connfd, const void *arg, size_t length)
   while ((len = recv(socket_connfd, (void *) buffer + offset, chunk - offset, 0)) > 0) {
     offset = 0;
     LOGD("recv %d", chunk - offset);
-    server_sppush_push(DEFAULT_LINE, buffer, per_simple_chunk_bytes, bytes);
+    server_sppush_push(DEFAULT_LINE, buffer, per_sample_chunk_bytes, bytes);
 
     uint32_t time = 0;
     send(socket_connfd, &time, 4, 0);

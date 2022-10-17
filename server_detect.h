@@ -17,8 +17,8 @@
 */
 
 
-#ifndef SERVER_SPEAKER_DETECT_H
-#define SERVER_SPEAKER_DETECT_H
+#ifndef SERVER_DETECT_H
+#define SERVER_DETECT_H
 
 #include "common/connection.h"
 
@@ -38,4 +38,4 @@ int server_detect_init(const struct server_detect_config_s *cfg);
 
 int server_detect_deinit();
 
-#endif //DETECT_H
+#endif //SERVER_DETECT_H

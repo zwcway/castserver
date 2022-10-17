@@ -21,6 +21,7 @@
 
 #include <unistd.h>
 #include <string.h>
+#include <sys/time.h>
 #include "common/log.h"
 #include "common/connection.h"
 #include "common/event/event.h"
@@ -29,7 +30,7 @@
 #include "config.h"
 
 
-channel_list_t *channel_list = 0; // audio source supported channel
+channel_list_t *server_channel_list = 0; // audio source supported channel
 
 static addr_t listen_ip = {AF_INET, .ipv6 = IN6ADDR_ANY_INIT};
 
@@ -39,6 +40,12 @@ static uint8_t buffer[CONTROL_PACKAGE_SIZE] = {0};
 static connection_t conn = DEFAULT_CONNECTION_UDP_INIT;
 
 LOG_TAG_DECLR("server");
+
+uint64_t utime() {
+  struct timeval tv;
+  gettimeofday(&tv, NULL);
+  return tv.tv_sec * 1000000L + tv.tv_usec;
+}
 
 int server_spctrl_sendto_speaker(const speaker_t *speaker, const void *package, const size_t len) {
   size_t s;
@@ -60,34 +67,11 @@ int server_spctrl_sendto_speaker(const speaker_t *speaker, const void *package, 
 }
 
 int server_spctrl_speaker(const speaker_t *speaker, const control_package_t *hd) {
-  LOGD("speaker control command: %d", hd->cmd);
+  LOGD("speaker control command: %d", hd->header.cmd);
 
-  CONTROL_PACKAGE_ENCODE(buffer, hd);
+  control_package_encode(buffer, hd);
 
   return server_spctrl_sendto_speaker(speaker, buffer, CONTROL_PACKAGE_SIZE);
-}
-
-/**
- * 加快消息推送速度，使用connect预连接
- * @param speaker
- * @return
- */
-int server_spctrl_connect(const speaker_t *speaker) {
-  struct sockaddr_storage addr = {0};
-  socklen_t len;
-
-  if (!SPEAKER_ON_LINE(speaker)) {
-    LOGE("speaker offline, can not connect.");
-    return ERROR_SPEAKER;
-  }
-
-  len = set_sockaddr(&addr, &speaker->ip, speaker->dport);
-  if (connect(conn.read_fd, (struct sockaddr *) &addr, len) != 0) {
-    LOGE("connect error: %m");
-    return ERROR_SOCKET;
-  }
-
-  return OK;
 }
 
 socket_t create_control_socket() {
@@ -99,9 +83,27 @@ socket_t create_control_socket() {
   return ctrl_sockfd;
 }
 
+void spctrl_time(const void *package) {
+  control_time_t pk;
+  control_time_decode(&pk, package);
+
+  speaker_t *sp = find_speaker_by_id(pk.header.spid);
+  control_package_t hd = {
+      .header.cmd = SPCMD_TIME,
+  };
+  if (sp == NULL) {
+    return;
+  }
+
+  hd.time.server = utime();
+  hd.time.offset = hd.time.server - sp->conn_time;
+
+  server_spctrl_speaker(sp, &hd);
+}
+
 int srv_spctrl_read(connection_t *c, const struct sockaddr_storage *src, socklen_t src_len, const void *package,
                     uint32_t len) {
-//  if (len == CONTROL_RESP_SIZE && CONTROL_IS_CMD(package, SPCMD_CTRL_PORT)) {
+//  if (len == CONTROL_RESP_SIZE && control_is_cmd(package, SPCMD_CTRL_PORT)) {
 //    if (set_speaker_ctrlport((control_resp_t *) package, (const struct sockaddr *) source, addr_len) < 0) {
 //      control_resp.cmd = SPCMD_UNKNOWN_SP;
 //      control_resp.spid = ((control_resp_t *) package)->spid;
@@ -109,7 +111,10 @@ int srv_spctrl_read(connection_t *c, const struct sockaddr_storage *src, socklen
 //    }
 //    return 0;
 //  }
-
+  if (len == CONTROL_TIME_SIZE && control_is_cmd(package, SPCMD_TIME)) {
+    spctrl_time(package);
+    return 0;
+  }
 
   if (len < 16) {
     LOGW("control error. size %d", len);
@@ -120,18 +125,22 @@ int srv_spctrl_read(connection_t *c, const struct sockaddr_storage *src, socklen
 }
 
 
+void server_spctrl_set_time(speaker_t *sp) {
+  sp->conn_time = utime();
+}
+
 void server_spctrl_format(uint32_t rate, uint32_t bits) {
   speaker_t *s;
   control_package_t hd = {
-    .cmd = SPCMD_SAMPLE,
-    .sample = {
-      .bits = bits,
-      .rate = rate,
-    },
+      .header.cmd = SPCMD_SAMPLE,
+      .sample = {
+          .bits = bits,
+          .rate = rate,
+      },
   };
 
   SPEAKER_FOREACH(s) {
-    if (s->state == SPEAKER_STAT_ONLINE) {
+    if (SPEAKER_IS_ONLINE(s)) {
       hd.sample.channel = s->channel;
       server_spctrl_speaker(s, &hd);
     }
@@ -139,12 +148,17 @@ void server_spctrl_format(uint32_t rate, uint32_t bits) {
 }
 
 void server_spctrl_set_format(const channel_list_t *list, uint32_t rate, uint32_t bits) {
-  channel_list = (channel_list_t *) list;
+  server_channel_list = (channel_list_t *) list;
 
-  server_spctrl_format(rate, bits);
   if (config_speaker_rate != rate || config_speaker_bits != bits) {
     // TODO turn on reformat rate and bits
   }
+
+  server_spctrl_format(rate, bits);
+}
+
+void server_spctrl_sync_time(const speaker_t *sp) {
+
 }
 
 int server_spctrl_init(struct server_spctrl_config_s *cfg) {

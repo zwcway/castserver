@@ -30,15 +30,20 @@ struct speaker_push_config {
     addr_t *ip;
     sa_family_t family;
 };
-extern channel_list_t *channel_list;
+extern channel_list_t *server_channel_list;
 
 
 int server_sppush_init(struct speaker_push_config *cfg);
 
 int server_sppush_deinit();
 
-int server_sppush_push(speaker_line_t line, const uint8_t *samples, size_t len, uint8_t bytes);
+int server_sppush_connect(speaker_t *speaker);
 
-int server_sppush_push_channel(speaker_line_t line, audio_channel_t ch, const uint8_t *buf, size_t len);
+int server_sppush_disconnect(speaker_t *speaker);
+
+int
+server_sppush_push(speaker_line_t line, const uint8_t *samples, size_t len, const channel_list_t *chlist, uint8_t bits);
+
+int server_sppush_push_channel(speaker_line_t line, audio_channel_t ch, uint8_t *buf, size_t len);
 
 #endif

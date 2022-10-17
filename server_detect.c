@@ -32,12 +32,13 @@
 #include "common/package/detect.h"
 #include "common/error.h"
 
-#include "server_speaker_detect.h"
+#include "server_detect.h"
 #include "server.h"
 #include "common/common.h"
 #include "server_mutex.h"
 #include "server_speaker_control.h"
 #include "config.h"
+#include "server_speaker_pusher.h"
 
 
 static interface_t interface = {0};
@@ -45,15 +46,16 @@ static addr_t multicast_group = {0};
 static uint16_t multicast_port = 0;
 static server_detect_fn detect_cb = NULL;
 
-static detect_response_t server_notify_resp = {0};
+static spk_detect_response_t server_notify_resp = {0};
 static pthread_t online_detect_thread;
 
 static connection_t conn = DEFAULT_CONNECTION_UDP_INIT;
 
 LOG_TAG_DECLR("server");
 
-int valid_speaker(detect_request_t *header) {
+static int valid_speaker(spk_detect_request_t *header) {
   speaker_t *sp = NULL;
+  uint8_t support = 1;
   control_package_t hd = {0};
 
   if (header->bits_mask <= 0) {
@@ -67,40 +69,52 @@ int valid_speaker(detect_request_t *header) {
 
   if (!MASK_ISSET(header->bits_mask, config_speaker_bits)) {
     LOGW("Unsupported speaker bits %u", config_speaker_bits);
+    support = 0;
   }
   if (!MASK_ISSET(header->rate_mask, config_speaker_rate)) {
     LOGW("Unsupported speaker rate %u", config_speaker_rate);
+    support = 0;
   }
 
   sp = find_speaker_by_id(header->id);
-  if (sp == NULL) {
-    sp = add_speaker(header->id, DEFAULT_LINE, DEFAULT_CHANNEL);
 
-    if (sp == NULL) {
-      LOGE("add speaker error");
-      return -1;
-    }
-
-    SPEAKER_STRUCT_INIT_FROM_HEADER(sp, header, CHANNEL_FRONT_LEFT);
-
-    LOGI("found a new speaker: %u (%s)%s:%d", sp->id, mac_ntop(&sp->mac), addr_ntop(&sp->ip), sp->dport);
+  if (sp != NULL) {
+    sp->supported = support;
     speaker_check_online(sp);
-
-    server_spctrl_connect(sp);
-
-    // 设置 speaker 设备的音频格式
-    hd.cmd = SPCMD_SAMPLE;
-    hd.sample.bits = config_speaker_bits;
-    hd.sample.rate = config_speaker_rate;
-    hd.sample.channel = sp->channel;
-
-    server_spctrl_speaker(sp, &hd);
-
-    if (detect_cb != NULL) detect_cb(sp);
-  } else {
-    speaker_check_online(sp);
+    return 0;
   }
 
+  sp = add_speaker(header->id, DEFAULT_LINE, DEFAULT_CHANNEL);
+
+  if (sp == NULL) {
+    LOGE("add speaker error");
+    return -1;
+  }
+
+  sp->supported = support;
+
+  SPEAKER_STRUCT_INIT_FROM_HEADER(sp, header);
+
+  LOGI("found a new speaker: %u (%s)%s:%d", sp->id, mac_ntop(&sp->mac), addr_ntop(&sp->ip), sp->dport);
+  speaker_check_online(sp);
+
+  server_sppush_connect(sp);
+
+  if (!support)
+    return -1;
+
+  server_spctrl_set_time(sp);
+
+  // 设置 speaker 设备的音频格式
+  hd.cmd = SPCMD_SAMPLE;
+  hd.sample.bits = config_speaker_bits;
+  hd.sample.rate = config_speaker_rate;
+  hd.sample.channel = sp->channel;
+
+  server_spctrl_speaker(sp, &hd);
+
+  if (detect_cb != NULL)
+    detect_cb(sp);
   return 0;
 }
 
@@ -228,8 +242,9 @@ void multicast_serverinfo() {
 
 int srv_detect_read(connection_t *c, const struct sockaddr_storage *src, socklen_t src_len, const void *package,
                     uint32_t len) {
-  detect_request_t req = {0};
+  spk_detect_request_t req = {0};
 
+  // 服务端单例
   if (len == MUTEX_TAG_SIZE && memcmp(package, MUTEX_TAG, MUTEX_TAG_SIZE) == 0) {
     LOGI("detect another server %s, just kill it.", sockaddr_ntop(src));
     len = sendto(c->read_fd,
@@ -242,50 +257,55 @@ int srv_detect_read(connection_t *c, const struct sockaddr_storage *src, socklen
     }
     return 0;
   }
-  if (len != DETECT_REQUEST_SIZE(src->ss_family)) {
-    LOGD("detect receive error. size %d need %d from %s:%d",
-         (uint32_t) len, DETECT_REQUEST_SIZE(src->ss_family),
-         sockaddr_ntop(src), sockaddr_port(src)
-    );
-    return -1;
+
+  if (len == spk_detect_request_size(src->ss_family)) {
+    spk_detect_request_decode(src->ss_family, &req, package);
+
+    if (!EQUAL_SOCK_ADDR(src, &req.addr)) {
+      LOGW("invalid source ip %s:%d (%s)", sockaddr_ntop(src), sockaddr_port(src), addr_ntop(&req.addr));
+      return -1;
+    }
+
+    if (valid_speaker(&req) != 0) {
+      LOGW("invalid speaker request %s:%d (%s)", sockaddr_ntop(src), sockaddr_port(src));
+      return -1;
+    }
+
+    src_len = set_sockaddr((struct sockaddr_storage *) src, &req.addr, 4414);
+    server_notify_resp.type = 0;
+    // response server addr
+    ssize_t n = sendto(c->read_fd,
+                       &server_notify_resp, sizeof(server_notify_resp),
+                       0,
+                       (const struct sockaddr *) src, src_len);
+    if (n < 0) {
+      LOGE("response server info error: %m");
+      return -1;
+    }
+    if (n != sizeof(server_notify_resp)) {
+      LOGE("response server info fail. sended %d/%d", len, sizeof(server_notify_resp));
+    }
+    LOGD("response server info to %s:%d  size %d", sockaddr_ntop(src), sockaddr_port(src), n);
+    return 0;
   }
 
-  DETECT_REQUEST_DECODE(src->ss_family, &req, package);
-
-  if (!EQUAL_SOCK_ADDR(src, &req.addr)) {
-    LOGW("invalid source ip %s:%d (%s)", sockaddr_ntop(src), sockaddr_port(src), addr_ntop(&req.addr));
-    return -1;
-  }
-
-  if (valid_speaker(&req) != 0) {
-    return -1;
-  }
-
-  src_len = set_sockaddr((struct sockaddr_storage *) src, &req.addr, 4414);
-  server_notify_resp.type = 0;
-  // response server addr
-  ssize_t n = sendto(c->read_fd,
-                     &server_notify_resp, sizeof(server_notify_resp),
-                     0,
-                     (const struct sockaddr *) src, src_len);
-  if (n < 0) {
-    LOGE("response server info error: %m");
-    return -1;
-  }
-  if (n != sizeof(server_notify_resp)) {
-    LOGE("response server info fail. sended %d/%d", len, sizeof(server_notify_resp));
-  }
-  LOGD("response server info to %s:%d  size %d", sockaddr_ntop(src), sockaddr_port(src), n);
-  return 0;
+  LOGD("detect receive error. size %d need %d from %s:%d",
+       (uint32_t) len, spk_detect_request_size(src->ss_family),
+       sockaddr_ntop(src), sockaddr_port(src)
+  );
+  return -1;
 }
 
 void *thread_online_detect(void *arg) {
   speaker_t *sp;
   while (!exit_thread_flag) {
 
-    SPEAKER_FOREACH(sp) {
-      if (sp->time-- == 0) {
-        sp->state = SPEAKER_STAT_OFFLINE;
+    // 客户端超时自动离线
+    SPEAKER_FOREACH(sp)
+    {
+      if (sp->timeout-- <= 0) {
+        SPEAKER_OFFLINE(sp);
+        server_sppush_disconnect(sp);
       }
     };
 

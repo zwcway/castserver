@@ -32,7 +32,7 @@
 #include "common/speaker_struct.h"
 #include "command_control.h"
 #include "server_speaker_pusher.h"
-#include "server_speaker_detect.h"
+#include "server_detect.h"
 #include "server_mutex.h"
 #include "server_speaker_control.h"
 #include "server_http.h"

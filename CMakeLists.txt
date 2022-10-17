@@ -4,6 +4,12 @@ project(castserver LANGUAGES C)
 
 option(BUILD_CLIENT "Client" ON)
 
+IF (CMAKE_BUILD_TYPE STREQUAL Debug)
+  ADD_DEFINITIONS(-DDEBUG)
+else ()
+  ADD_DEFINITIONS(-DNDEBUG)
+ENDIF ()
+
 set(SERVER_LIBRARIES
     ${CMAKE_THREAD_LIBS_INIT}
     common

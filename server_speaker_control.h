@@ -32,16 +32,16 @@ struct server_spctrl_config_s {
     sa_family_t family;
 };
 
-extern channel_list_t *channel_list;
+extern channel_list_t *server_channel_list;
 
 int server_spctrl_init(struct server_spctrl_config_s *cfg);
 
 int server_spctrl_deinit();
 
+void server_spctrl_set_time(speaker_t *sp);
+
 void server_spctrl_set_format(const channel_list_t *list, uint32_t rate, uint32_t bits);
 
 int server_spctrl_speaker(const speaker_t *speaker, const control_package_t *hd);
-
-int server_spctrl_connect(const speaker_t *speaker);
 
 #endif //SPEAKER_CONTROL_H
